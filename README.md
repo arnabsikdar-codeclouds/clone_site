@@ -2,6 +2,8 @@
 
 A Python-based static website cloner with a real-time web UI. Provide a URL, and SiteCloner will crawl the entire site — static, JavaScript-rendered, or behind authentication — download all pages and assets, rewrite URLs for offline use, and package everything for local browsing, in-app preview, or ZIP download.
 
+![SiteCloner UI](docs/screenshot.png)
+
 ## Features
 
 - **Full site cloning** — crawls HTML pages, CSS, JavaScript, images, fonts, and videos
