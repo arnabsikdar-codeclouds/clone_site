@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import uuid
 import zipfile
 from typing import Any
@@ -82,6 +83,29 @@ class JobManager:
         finally:
             # Send terminal event
             await self._broadcast(job.job_id, {"type": "end", "status": job.status.value})
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a job and its output files from disk."""
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+
+        # Remove output directory
+        if job.output_path and os.path.isdir(job.output_path):
+            shutil.rmtree(job.output_path, ignore_errors=True)
+
+        # Remove cached ZIP
+        if job_id in self._zip_cache:
+            zip_path = self._zip_cache.pop(job_id)
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+
+        # Clean up subscribers
+        self._subscribers.pop(job_id, None)
+
+        # Remove job record
+        del self._jobs[job_id]
+        return True
 
     def get_zip_path(self, job: CloneJob) -> str | None:
         """Generate or return cached ZIP for a completed job."""

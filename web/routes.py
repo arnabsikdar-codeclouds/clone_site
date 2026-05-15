@@ -3,9 +3,10 @@ import json
 import logging
 import os
 import mimetypes
+import re
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from .schemas import CloneRequest, CloneResponse, JobResponse
 from .job_manager import JobManager
@@ -98,8 +99,17 @@ async def download_zip(job_id: str) -> FileResponse:
     return FileResponse(zip_path, filename=filename, media_type="application/zip")
 
 
+@router.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_manager.delete_job(job_id)
+    return {"message": "Job deleted"}
+
+
 @router.get("/api/jobs/{job_id}/browse/{path:path}")
-async def browse_file(job_id: str, path: str) -> FileResponse:
+async def browse_file(job_id: str, path: str, request: Request):
     job = job_manager.get_job(job_id)
     if not job or not job.output_path:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -117,6 +127,31 @@ async def browse_file(job_id: str, path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="File not found")
 
     content_type, _ = mimetypes.guess_type(file_path)
+
+    # For HTML files, inject <base> tag and history.replaceState so SPA routers
+    # see "/" as the pathname instead of the browse endpoint path.
+    if content_type and "html" in content_type:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            html = f.read()
+
+        browse_base = f"/api/jobs/{job_id}/browse/"
+        # Build the path relative to the browse root for sub-pages
+        rel_dir = os.path.relpath(os.path.dirname(file_path), job.output_path).replace("\\", "/")
+        if rel_dir and rel_dir != ".":
+            browse_base += rel_dir + "/"
+
+        inject = (
+            f'<base href="{browse_base}">'
+            '<script>history.replaceState(null,"","/");</script>'
+        )
+        # Insert after <head> or at the top of the document
+        if re.search(r"<head[^>]*>", html, re.IGNORECASE):
+            html = re.sub(r"(<head[^>]*>)", r"\1" + inject, html, count=1, flags=re.IGNORECASE)
+        else:
+            html = inject + html
+
+        return HTMLResponse(content=html, media_type="text/html")
+
     return FileResponse(file_path, media_type=content_type)
 
 

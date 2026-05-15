@@ -152,6 +152,20 @@ header {
     color: var(--text-muted);
 }
 
+.progress-spinner {
+    animation: spin 1.2s linear infinite;
+}
+
+.progress-spinner.done {
+    animation: none;
+    color: var(--green);
+}
+
+.progress-spinner.failed {
+    animation: none;
+    color: var(--red);
+}
+
 /* ===== Clone Form ===== */
 .clone-form {
     background: var(--bg-card);
@@ -659,6 +673,17 @@ header {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
     box-shadow: 0 2px 12px rgba(99, 102, 241, 0.25);
+}
+
+.job-actions button.danger {
+    color: var(--red);
+    border-color: rgba(239, 68, 68, 0.2);
+}
+
+.job-actions button.danger:hover {
+    background: var(--red-bg);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: var(--red);
 }
 
 /* ===== Responsive ===== */

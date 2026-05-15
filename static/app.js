@@ -52,6 +52,7 @@ function showProgress() {
     document.getElementById("progress-pct").textContent = "0%";
     document.getElementById("event-log").innerHTML = "";
     updateBadge("crawling");
+    updateProgressHeading("Progress", "spinner");
     section.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -109,21 +110,25 @@ function subscribeToEvents(jobId) {
                 document.getElementById("progress-bar").style.width = "100%";
                 document.getElementById("progress-pct").textContent = "100%";
                 updateBadge("done");
+                updateProgressHeading("Complete", "done");
                 addLog(
                     `Done! ${data.pages_crawled} pages, ${data.assets_downloaded} assets, ${data.errors} errors`,
                     "success"
                 );
                 refreshJobs();
                 es.close();
+                hideProgressAfterDelay();
                 break;
 
             case "end":
                 if (data.status === "failed") {
                     updateBadge("failed");
+                    updateProgressHeading("Failed", "failed");
                     addLog("Clone failed!", "error");
                 }
                 refreshJobs();
                 es.close();
+                hideProgressAfterDelay();
                 break;
         }
     };
@@ -131,6 +136,74 @@ function subscribeToEvents(jobId) {
     es.onerror = () => {
         es.close();
     };
+}
+
+function hideProgressAfterDelay() {
+    setTimeout(() => {
+        const section = document.getElementById("progress-section");
+        section.style.transition = "opacity 0.4s ease, transform 0.4s ease";
+        section.style.opacity = "0";
+        section.style.transform = "translateY(-10px)";
+        setTimeout(() => {
+            section.classList.add("hidden");
+            section.style.opacity = "";
+            section.style.transform = "";
+            section.style.transition = "";
+        }, 400);
+    }, 2000);
+}
+
+function updateProgressHeading(text, state) {
+    const title = document.getElementById("progress-title");
+    const heading = document.getElementById("progress-heading");
+    title.textContent = text;
+
+    // Replace the SVG entirely since innerHTML doesn't work on SVG elements
+    const oldIcon = heading.querySelector("svg");
+    if (oldIcon) oldIcon.remove();
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", "18");
+    svg.setAttribute("height", "18");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.classList.add("progress-spinner");
+
+    if (state === "done") {
+        svg.classList.add("done");
+        const pl = document.createElementNS(svgNS, "polyline");
+        pl.setAttribute("points", "20 6 9 17 4 12");
+        svg.appendChild(pl);
+    } else if (state === "failed") {
+        svg.classList.add("failed");
+        const c = document.createElementNS(svgNS, "circle");
+        c.setAttribute("cx", "12"); c.setAttribute("cy", "12"); c.setAttribute("r", "10");
+        const l1 = document.createElementNS(svgNS, "line");
+        l1.setAttribute("x1", "15"); l1.setAttribute("y1", "9"); l1.setAttribute("x2", "9"); l1.setAttribute("y2", "15");
+        const l2 = document.createElementNS(svgNS, "line");
+        l2.setAttribute("x1", "9"); l2.setAttribute("y1", "9"); l2.setAttribute("x2", "15"); l2.setAttribute("y2", "15");
+        svg.append(c, l1, l2);
+    } else {
+        const lines = [
+            ["12","2","12","6"], ["12","18","12","22"],
+            ["4.93","4.93","7.76","7.76"], ["16.24","16.24","19.07","19.07"],
+            ["2","12","6","12"], ["18","12","22","12"],
+            ["4.93","19.07","7.76","16.24"], ["16.24","7.76","19.07","4.93"]
+        ];
+        for (const [x1,y1,x2,y2] of lines) {
+            const l = document.createElementNS(svgNS, "line");
+            l.setAttribute("x1", x1); l.setAttribute("y1", y1);
+            l.setAttribute("x2", x2); l.setAttribute("y2", y2);
+            svg.appendChild(l);
+        }
+    }
+
+    heading.insertBefore(svg, title);
 }
 
 function updateBadge(status) {
@@ -221,6 +294,12 @@ function renderJobs(jobs) {
                     </button>`
                 );
             }
+            actions.push(
+                `<button class="danger" onclick="deleteJob('${job.job_id}')">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    Delete
+                </button>`
+            );
             return `
                 <div class="job-card">
                     <div class="job-info">
@@ -257,6 +336,22 @@ function browseJob(jobId) {
 
 function downloadJob(jobId) {
     window.location.href = `/api/jobs/${jobId}/download`;
+}
+
+async function deleteJob(jobId) {
+    if (!confirm("Delete this cloned site?")) return;
+    try {
+        const resp = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
+        if (!resp.ok) {
+            const err = await resp.json();
+            showToast("Error: " + (err.detail || "Failed to delete"), "error");
+            return;
+        }
+        showToast("Deleted successfully");
+        refreshJobs();
+    } catch (e) {
+        showToast("Error: " + e.message, "error");
+    }
 }
 
 function escapeHtml(text) {
