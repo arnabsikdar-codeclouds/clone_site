@@ -19,7 +19,7 @@ from .parser import parse_html, parse_css
 from .rewriter import rewrite_html, rewrite_css
 from .encoding import decode_content
 from .robots import RobotsChecker
-from .renderer import is_playwright_available, PlaywrightRenderer
+from .renderer import is_playwright_available, PlaywrightRenderer, ThreadedPlaywrightRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,8 @@ class CloneEngine:
         self._config = config
         self._downloader = Downloader(config)
 
-    async def run(self, job: CloneJob, progress: ProgressCallback | None = None) -> None:
+    async def run(self, job: CloneJob, progress: ProgressCallback | None = None,
+                  seed_urls: list[str] | None = None) -> None:
         """Execute the full clone pipeline."""
         start_url = normalize_url(job.url)
         domain = job.domain
@@ -48,15 +49,22 @@ class CloneEngine:
         css_assets: dict[str, Asset] = {}   # url -> Asset (CSS files)
         all_assets: dict[str, Asset] = {}   # url -> Asset (all non-HTML assets)
 
-        # Optional Playwright renderer
-        renderer: PlaywrightRenderer | None = None
-        if self._config.use_playwright and is_playwright_available():
-            renderer = PlaywrightRenderer(self._config.user_agent)
+        # Optional Playwright renderer — use ThreadedPlaywrightRenderer to avoid
+        # Windows event loop issues (subprocess_exec NotImplementedError).
+        # Auto-enable when auth cookies are present (JS-rendered nav links).
+        use_renderer = self._config.use_playwright or bool(self._config.auth_cookies)
+        renderer: ThreadedPlaywrightRenderer | PlaywrightRenderer | None = None
+        if use_renderer and is_playwright_available():
+            renderer = ThreadedPlaywrightRenderer(
+                user_agent=self._config.user_agent,
+                cookies=self._config.auth_cookies,
+                target_url=start_url,
+            )
 
         # robots.txt checker
         robots = RobotsChecker(self._config.user_agent)
 
-        await self._downloader.start()
+        await self._downloader.start(target_url=start_url)
         if renderer:
             await renderer.start()
         try:
@@ -89,6 +97,15 @@ class CloneEngine:
                     visited.add(norm)
                     queue.append((norm, 1))
 
+            # Add seed URLs discovered from authenticated browser session
+            if seed_urls:
+                for surl in seed_urls:
+                    norm = normalize_url(surl)
+                    if norm not in visited and is_same_domain(norm, domain):
+                        visited.add(norm)
+                        queue.append((norm, 1))
+                logger.info("Injected %d seed URLs from login session", len(seed_urls))
+
             pending_assets: set[str] = set()
 
             while queue:
@@ -120,8 +137,8 @@ class CloneEngine:
                             if norm not in pending_assets and norm not in url_map:
                                 pending_assets.add(norm)
                     except Exception as e:
-                        logger.warning("Playwright render failed for %s: %s, falling back", url, e)
-                        status, body, content_type, err = await self._downloader.fetch(url)
+                        logger.warning("Playwright render FAILED for %s: %s, falling back to raw fetch", url, e)
+                        status, body, content_type, _final, err = await self._downloader.fetch_with_final_url(url)
                         if err:
                             job.errors.append(err)
                             await self._notify(progress, {
@@ -129,8 +146,11 @@ class CloneEngine:
                                 "error": err.message, "category": err.category.value,
                             })
                             continue
+                        if self._is_auth_redirect(url, _final):
+                            logger.info("Skipping %s — redirected to login: %s", url, _final)
+                            continue
                 else:
-                    status, body, content_type, err = await self._downloader.fetch(url)
+                    status, body, content_type, final_url, err = await self._downloader.fetch_with_final_url(url)
 
                 if not renderer:
                     if err:
@@ -139,6 +159,11 @@ class CloneEngine:
                             "type": "error", "url": url,
                             "error": err.message, "category": err.category.value,
                         })
+                        continue
+                    # Detect auth redirects: if the final URL is a login/auth page,
+                    # skip this page — we got the login form, not the real content.
+                    if self._is_auth_redirect(url, final_url):
+                        logger.info("Skipping %s — redirected to login: %s", url, final_url)
                         continue
 
                 if status == 0 or not body:
@@ -370,6 +395,23 @@ class CloneEngine:
             await self._downloader.close()
             if renderer:
                 await renderer.close()
+
+    @staticmethod
+    def _is_auth_redirect(requested_url: str, final_url: str) -> bool:
+        """Detect if a fetch was redirected to a login/auth page."""
+        if not final_url or not requested_url:
+            return False
+        req_path = urlparse(requested_url).path.rstrip("/")
+        final_parsed = urlparse(final_url)
+        final_path = final_parsed.path.rstrip("/")
+        # Same path — no redirect
+        if req_path == final_path:
+            return False
+        # Check if redirected to a common login/auth URL pattern
+        login_keywords = ("login", "signin", "sign-in", "sign_in", "auth", "sso",
+                          "cas/login", "oauth", "account/login", "saml")
+        final_lower = final_parsed.path.lower() + "?" + final_parsed.query.lower()
+        return any(kw in final_lower for kw in login_keywords)
 
     async def _notify(self, callback: ProgressCallback | None, data: dict[str, Any]) -> None:
         if callback:

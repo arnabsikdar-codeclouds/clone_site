@@ -1,12 +1,12 @@
 # SiteCloner
 
-A Python-based static website cloner with a real-time web UI. Provide a URL, and SiteCloner will crawl the entire site — static or JavaScript-rendered — download all pages and assets, rewrite URLs for offline use, and package everything for local browsing, in-app preview, or ZIP download.
+A Python-based static website cloner with a real-time web UI. Provide a URL, and SiteCloner will crawl the entire site — static, JavaScript-rendered, or behind authentication — download all pages and assets, rewrite URLs for offline use, and package everything for local browsing, in-app preview, or ZIP download.
 
 ## Features
 
 - **Full site cloning** — crawls HTML pages, CSS, JavaScript, images, fonts, and videos
 - **Offline-ready** — all internal URLs are rewritten to relative paths so the cloned site works without a server
-- **SPA / JavaScript rendering** — optional Playwright integration renders JS-heavy pages (React, Vue, Angular) before downloading
+- **SPA / JavaScript rendering** — optional Playwright integration renders JS-heavy pages (React, Vue, Angular) via a ThreadedPlaywrightRenderer that runs in a separate thread with cookie support
 - **Real-time progress** — live updates via Server-Sent Events (SSE) with page count, asset count, error count, and activity log
 - **In-app site preview** — preview cloned sites in a sandboxed iframe modal without leaving the UI
 - **Dedicated browse URL** — browse cloned sites at `/site/{job_id}/` in a new tab with SPA routing support
@@ -19,6 +19,7 @@ A Python-based static website cloner with a real-time web UI. Provide a URL, and
 - **Rate limiting** — per-domain request delay to avoid overwhelming target servers
 - **API rate limiting** — sliding window rate limiter per IP on the clone endpoint (default 10 req/min)
 - **SSL verification toggle** — disable SSL verification for self-signed or internal certificates
+- **Browser-based login** — "Login First" opens a real browser so you can log into the target site; cookies and navigation links are captured automatically for authenticated cloning
 - **Authentication support** — pass custom cookies and HTTP headers for authenticated sites
 - **Compression support** — handles gzip, deflate, and Brotli-compressed responses
 - **Priority download queue** — CSS files downloaded first to discover secondary assets (fonts, backgrounds)
@@ -29,7 +30,7 @@ A Python-based static website cloner with a real-time web UI. Provide a URL, and
 - **Job history** — search by domain and filter by status (Done, Failed, Cancelled, Crawling, Downloading)
 - **Retry failed jobs** — one-click retry for failed or cancelled jobs
 - **Configurable** — control crawl depth, max pages, concurrency, timeout, file size limits, and more
-- **98 unit tests** — comprehensive test suite covering all modules
+- **Seed URL injection** — navigation links discovered during browser login are automatically added to the crawl queue
 
 ## How It Works
 
@@ -39,12 +40,14 @@ SiteCloner operates in four sequential phases:
 
 The engine starts from the given URL and performs a **breadth-first search** across the site. For each HTML page it downloads:
 
-1. The page content is fetched via aiohttp (or Playwright if JS rendering is enabled)
+1. The page content is fetched via aiohttp (or ThreadedPlaywrightRenderer if JS rendering is enabled or auth cookies are present)
 2. BeautifulSoup parses the HTML to extract two things:
    - **Page links** (`<a href>`) — queued for further crawling (if within depth limit)
    - **Asset URLs** (CSS, JS, images, fonts, videos from `<link>`, `<script>`, `<img>`, `<video>`, `<audio>`, `<source>`, inline styles, etc.)
 3. Only same-domain links are followed; external URLs are left as-is
 4. robots.txt rules are checked before crawling each URL (if enabled)
+
+5. Seed URLs from a browser login session are injected into the initial crawl queue
 
 Crawling stops when `max_depth`, `max_pages` is reached, or cancellation is requested.
 
@@ -82,22 +85,26 @@ All rewritten files are written asynchronously (via aiofiles) to `output/<domain
                     | Middleware  |  API rate limiting (per IP)
                     +-----+------+
                           |
-                    +-----v------+
-                    | JobManager |  lifecycle, SSE pub/sub, TTL cleanup
-                    +-----+------+
-                          |
-                    +-----v------+
-                    |CloneEngine |  BFS orchestrator (4 phases)
-                    +-----+------+
-                          |
-            +-------+-----+-----+--------+
-            |       |           |        |
-       Downloader Parser    Rewriter  Renderer
-       (aiohttp) (BS4/lxml) (BS4/regex) (Playwright)
-            |
-      +-----+------+
-      |            |
-  RateLimiter  RobotsChecker
+               +----------+----------+
+               |                     |
+        +------v-------+     +------v--------+
+        |  JobManager  |     | LoginManager  |
+        | lifecycle,   |     | browser login,|
+        | SSE, cleanup |     | cookie capture|
+        +------+-------+     +---------------+
+               |
+        +------v-------+
+        | CloneEngine  |  BFS orchestrator (4 phases)
+        +------+-------+
+               |
+    +------+---+----+--------+
+    |      |        |        |
+Downloader Parser Rewriter Renderer
+(aiohttp) (BS4)  (BS4)    (ThreadedPlaywright)
+    |
++---+--------+
+|            |
+RateLimiter RobotsChecker
 ```
 
 ## Quick Start
@@ -137,6 +144,8 @@ The server starts at **http://localhost:8000**. Open it in your browser, enter a
 - Max depth and max pages controls
 - **Verify SSL** checkbox with tooltip — disable for self-signed/expired certificates
 - **JS Render** checkbox with tooltip — enable for single-page apps (React, Vue, Angular)
+- **Login First** button — opens a real browser for logging into the target site before cloning
+- Login status display showing browser state, captured cookies, and discovered navigation URLs
 
 ### Progress Section
 - Real-time stats grid: Pages, Assets, Errors (clickable for detail panel)
@@ -178,7 +187,8 @@ POST /api/clone
   "user_agent": "StaticSiteCloner/1.0",
   "auth_cookies": {"session": "abc123"},
   "auth_headers": {"Authorization": "Bearer token"},
-  "use_playwright": false
+  "use_playwright": false,
+  "seed_urls": ["https://example.com/dashboard"]
 }
 ```
 
@@ -195,6 +205,7 @@ POST /api/clone
 | `auth_cookies` | object | null | Custom cookies for authenticated sites |
 | `auth_headers` | object | null | Custom HTTP headers |
 | `use_playwright` | bool | false | Render pages with headless browser |
+| `seed_urls` | array | null | Additional URLs to inject into the crawl queue (e.g. from login discovery) |
 
 **Response:**
 ```json
@@ -308,6 +319,33 @@ GET /api/jobs/{job_id}/browse/{path}?embed=1
 
 API browse endpoint used by the iframe preview. With `embed=1`, adds frame-busting protection and appropriate CSP headers.
 
+### Browser Login Flow
+
+```
+POST /api/auth/login
+```
+
+**Request body:**
+```json
+{
+  "url": "https://example.com/login"
+}
+```
+
+Starts a browser login session. Opens a real Chromium browser where the user can manually log in to the target site. Returns a `session_id` to track the session.
+
+```
+GET /api/auth/login/{session_id}
+```
+
+Polls the login session status. Returns status (`pending`, `browser_open`, `done`, `expired`, `failed`), captured cookies, and discovered navigation URLs (seed URLs).
+
+```
+POST /api/auth/login/{session_id}/done
+```
+
+Signals that the user has finished logging in. The system captures cookies and navigation links from the authenticated page, then closes the browser.
+
 ## Configuration
 
 Default settings are defined in `config.py`:
@@ -349,12 +387,13 @@ copy_site/
 │   ├── engine.py           # BFS crawl orchestrator (4-phase pipeline)
 │   ├── encoding.py         # Charset detection utilities
 │   ├── robots.py           # robots.txt parsing & sitemap.xml discovery
-│   └── renderer.py         # Optional Playwright SPA renderer
+│   └── renderer.py         # Playwright renderer (ThreadedPlaywrightRenderer)
 ├── web/                    # Web layer
 │   ├── schemas.py          # Pydantic request/response models
 │   ├── job_manager.py      # Job lifecycle, SSE pub/sub, TTL cleanup
+│   ├── login_manager.py    # Browser-based login flow (Playwright)
 │   ├── routes.py           # API endpoints + cloned site serving
-│   └── middleware.py        # API rate limiting middleware
+│   └── middleware.py       # API rate limiting middleware
 ├── static/                 # Web UI (vanilla HTML/CSS/JS)
 │   ├── index.html
 │   ├── style.css
@@ -395,7 +434,7 @@ pytest tests/ -v
 
 ## Limitations
 
-- Only clones public content — does not bypass authentication or paywalls (custom cookies/headers are supported for authenticated access)
+- Authentication requires manual login via the browser flow — fully automated login is not supported
 - Stays within the same domain — cross-domain pages are not followed
 - Large sites may take significant time depending on page count and asset volume
 - Some dynamically loaded resources (lazy-loaded images, AJAX content) may be missed unless JS rendering is enabled

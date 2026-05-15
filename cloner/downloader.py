@@ -2,8 +2,10 @@ import asyncio
 import logging
 import random
 import time
+from urllib.parse import urlparse
 
 import aiohttp
+from yarl import URL
 
 from config import CloneConfig
 from .models import ErrorCategory, ErrorDetail
@@ -40,7 +42,7 @@ class Downloader:
         self._session: aiohttp.ClientSession | None = None
         self._rate_limiter = RateLimiter(config.request_delay)
 
-    async def start(self) -> None:
+    async def start(self, target_url: str = "") -> None:
         timeout = aiohttp.ClientTimeout(total=self._config.timeout)
         headers = {
             "User-Agent": self._config.user_agent,
@@ -59,10 +61,12 @@ class Downloader:
             cookie_jar=aiohttp.CookieJar(unsafe=True),
             connector=connector,
         )
-        # Pre-load auth cookies
+        # Pre-load auth cookies with proper domain association
         if self._config.auth_cookies:
-            for name, value in self._config.auth_cookies.items():
-                self._session.cookie_jar.update_cookies({name: value})
+            response_url = URL(target_url) if target_url else None
+            self._session.cookie_jar.update_cookies(
+                self._config.auth_cookies, response_url=response_url,
+            )
 
     async def close(self) -> None:
         if self._session:
@@ -72,13 +76,21 @@ class Downloader:
     async def fetch(self, url: str) -> tuple[int, bytes, str, ErrorDetail | None]:
         """Download a URL. Returns (status_code, body, content_type, error_detail).
         Retries with exponential backoff on transient errors."""
+        return await self._fetch_inner(url)
+
+    async def fetch_with_final_url(self, url: str) -> tuple[int, bytes, str, str, ErrorDetail | None]:
+        """Like fetch() but also returns the final URL after redirects.
+        Returns (status_code, body, content_type, final_url, error_detail)."""
+        return await self._fetch_inner(url, return_final_url=True)
+
+    async def _fetch_inner(self, url: str, return_final_url: bool = False):
         max_retries = self._config.max_retries
         base_delay = self._config.retry_base_delay
 
         last_error: ErrorDetail | None = None
         for attempt in range(max_retries):
             try:
-                status, body, ct = await self._do_fetch(url)
+                status, body, ct, final_url = await self._do_fetch(url)
                 # Retry on 5xx
                 if status >= 500 and attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
@@ -89,6 +101,8 @@ class Downloader:
                         message=f"HTTP {status}", status_code=status,
                     )
                     continue
+                if return_final_url:
+                    return (status, body, ct, final_url, None)
                 return (status, body, ct, None)
 
             except asyncio.TimeoutError:
@@ -123,24 +137,27 @@ class Downloader:
             else:
                 logger.warning("Failed to fetch %s after %d attempts: %s", url, max_retries, last_error.message)
 
+        if return_final_url:
+            return (0, b"", "", "", last_error)
         return (0, b"", "", last_error)
 
-    async def _do_fetch(self, url: str) -> tuple[int, bytes, str]:
+    async def _do_fetch(self, url: str) -> tuple[int, bytes, str, str]:
+        """Returns (status, body, content_type, final_url)."""
         # Rate limit per domain
-        from urllib.parse import urlparse
         domain = urlparse(url).hostname or ""
         await self._rate_limiter.acquire(domain)
 
         async with self._semaphore:
             async with self._session.get(url, allow_redirects=True) as resp:
                 content_type = resp.headers.get("Content-Type", "")
+                final_url = str(resp.url)
                 # Check content-length before reading
                 cl = resp.headers.get("Content-Length")
                 if cl and int(cl) > self._config.max_file_size:
                     logger.warning("Skipping %s -- too large (%s bytes)", url, cl)
-                    return (resp.status, b"", content_type)
+                    return (resp.status, b"", content_type, final_url)
                 body = await resp.read()
                 if len(body) > self._config.max_file_size:
                     logger.warning("Skipping %s -- body too large (%d bytes)", url, len(body))
-                    return (resp.status, b"", content_type)
-                return (resp.status, body, content_type)
+                    return (resp.status, b"", content_type, final_url)
+                return (resp.status, body, content_type, final_url)

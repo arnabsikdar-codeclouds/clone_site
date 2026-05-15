@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import CloneConfig
 from web.job_manager import JobManager
+from web.login_manager import LoginManager
 from web.routes import router, init_routes
 from web.middleware import APIRateLimitMiddleware
 
@@ -20,13 +22,22 @@ config = CloneConfig()
 os.makedirs(config.output_dir, exist_ok=True)
 
 manager = JobManager(config)
-init_routes(manager)
+login_mgr = LoginManager()
+init_routes(manager, login_mgr)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.start_cleanup_loop()
+
+    async def login_cleanup_loop():
+        while True:
+            await asyncio.sleep(60)
+            login_mgr.cleanup_expired()
+
+    cleanup_task = asyncio.create_task(login_cleanup_loop())
     yield
+    cleanup_task.cancel()
 
 
 app = FastAPI(title="Static Website Cloner", lifespan=lifespan)

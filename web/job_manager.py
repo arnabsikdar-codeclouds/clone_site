@@ -97,6 +97,7 @@ class JobManager:
         auth_cookies: dict[str, str] | None = None,
         auth_headers: dict[str, str] | None = None,
         use_playwright: bool | None = None,
+        seed_urls: list[str] | None = None,
     ) -> None:
         config = CloneConfig(
             max_depth=max_depth or self._config.max_depth,
@@ -122,7 +123,7 @@ class JobManager:
             await self._broadcast(job.job_id, data)
 
         try:
-            await engine.run(job, progress=on_progress)
+            await engine.run(job, progress=on_progress, seed_urls=seed_urls)
         finally:
             # Send terminal event
             await self._broadcast(job.job_id, {"type": "end", "status": job.status.value})

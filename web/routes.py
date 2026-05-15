@@ -8,8 +8,12 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
-from .schemas import CloneRequest, CloneResponse, JobResponse, ErrorDetailResponse
+from .schemas import (
+    CloneRequest, CloneResponse, JobResponse, ErrorDetailResponse,
+    LoginRequest, LoginStartResponse, LoginSessionResponse,
+)
 from .job_manager import JobManager
+from .login_manager import LoginManager
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +21,13 @@ router = APIRouter()
 
 # Will be set by app.py
 job_manager: JobManager | None = None
+login_manager: LoginManager | None = None
 
 
-def init_routes(manager: JobManager) -> None:
-    global job_manager
+def init_routes(manager: JobManager, login_mgr: LoginManager | None = None) -> None:
+    global job_manager, login_manager
     job_manager = manager
+    login_manager = login_mgr
 
 
 @router.post("/api/clone", response_model=CloneResponse)
@@ -47,6 +53,7 @@ async def start_clone(req: CloneRequest) -> CloneResponse:
         auth_cookies=req.auth_cookies,
         auth_headers=req.auth_headers,
         use_playwright=req.use_playwright,
+        seed_urls=req.seed_urls,
     ))
 
     return CloneResponse(job_id=job.job_id, message="Clone started", warning=warning)
@@ -234,6 +241,43 @@ async def _serve_cloned_file(
         return HTMLResponse(content=html, media_type="text/html", headers=headers)
 
     return FileResponse(file_path, media_type=content_type)
+
+
+@router.post("/api/auth/login", response_model=LoginStartResponse)
+async def start_login(req: LoginRequest) -> LoginStartResponse:
+    if not login_manager:
+        raise HTTPException(status_code=500, detail="Login manager not configured")
+    session = login_manager.create_session(req.url)
+    return LoginStartResponse(
+        session_id=session.session_id,
+        message="Browser launching — log in manually, then click 'Done' in the web UI.",
+    )
+
+
+@router.get("/api/auth/login/{session_id}", response_model=LoginSessionResponse)
+async def get_login_session(session_id: str) -> LoginSessionResponse:
+    if not login_manager:
+        raise HTTPException(status_code=500, detail="Login manager not configured")
+    session = login_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Login session not found")
+    return LoginSessionResponse(
+        session_id=session.session_id,
+        status=session.status,
+        cookies=session.cookies if session.status == "done" else None,
+        discovered_urls=session.discovered_urls if session.status == "done" else [],
+        error=session.error,
+    )
+
+
+@router.post("/api/auth/login/{session_id}/done")
+async def finish_login(session_id: str):
+    if not login_manager:
+        raise HTTPException(status_code=500, detail="Login manager not configured")
+    success = login_manager.finish_session(session_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Session not in browser_open state")
+    return {"message": "Extracting cookies..."}
 
 
 def _job_to_response(job) -> JobResponse:

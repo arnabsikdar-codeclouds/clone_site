@@ -13,6 +13,7 @@ class CloneRequest(BaseModel):
     auth_cookies: dict[str, str] | None = None
     auth_headers: dict[str, str] | None = None
     use_playwright: bool | None = None
+    seed_urls: list[str] | None = None
 
 
 class ErrorDetailResponse(BaseModel):
@@ -41,3 +42,20 @@ class CloneResponse(BaseModel):
     job_id: str
     message: str
     warning: str = ""
+
+
+class LoginRequest(BaseModel):
+    url: str
+
+
+class LoginStartResponse(BaseModel):
+    session_id: str
+    message: str
+
+
+class LoginSessionResponse(BaseModel):
+    session_id: str
+    status: str
+    cookies: dict[str, str] | None = None
+    discovered_urls: list[str] = []
+    error: str = ""

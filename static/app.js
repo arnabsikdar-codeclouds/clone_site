@@ -2,6 +2,10 @@ let currentEventSource = null;
 let currentJobId = null;
 let allJobs = [];
 let currentErrors = [];
+let loginSessionId = null;
+let loginCookies = null;
+let loginDiscoveredUrls = null;
+let loginPollTimer = null;
 
 async function startClone() {
     const urlInput = document.getElementById("url-input");
@@ -43,6 +47,8 @@ async function startClone() {
                 max_pages: maxPages,
                 verify_ssl: verifySSL,
                 use_playwright: usePlaywright,
+                auth_cookies: loginCookies || undefined,
+                seed_urls: loginDiscoveredUrls && loginDiscoveredUrls.length ? loginDiscoveredUrls : undefined,
             }),
         });
 
@@ -59,6 +65,7 @@ async function startClone() {
         currentJobId = data.job_id;
         showProgress();
         subscribeToEvents(data.job_id);
+        if (loginCookies) clearLoginSession();
     } catch (e) {
         showToast("Error: " + e.message, "error");
     } finally {
@@ -552,6 +559,134 @@ function showToast(message, type = "info") {
         toast.style.transition = "opacity 0.3s ease";
         setTimeout(() => toast.remove(), 300);
     }, 4000);
+}
+
+// ===== Login Flow =====
+async function startLoginSession() {
+    const url = document.getElementById("url-input").value.trim();
+    if (!url) {
+        showToast("Enter a URL first", "error");
+        document.getElementById("url-input").focus();
+        return;
+    }
+
+    const statusEl = document.getElementById("auth-status");
+    const statusText = document.getElementById("auth-status-text");
+    const doneBtn = document.getElementById("auth-done-btn");
+
+    statusEl.classList.remove("hidden");
+    statusText.textContent = "Launching browser...";
+    doneBtn.classList.add("hidden");
+
+    try {
+        const resp = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json();
+            statusText.textContent = "Failed";
+            showToast("Login error: " + (err.detail || "Unknown"), "error");
+            return;
+        }
+        const data = await resp.json();
+        loginSessionId = data.session_id;
+
+        // Poll until browser is actually open before showing Done button
+        if (loginPollTimer) clearInterval(loginPollTimer);
+        loginPollTimer = setInterval(async () => {
+            try {
+                const sr = await fetch(`/api/auth/login/${loginSessionId}`);
+                const sd = await sr.json();
+                if (sd.status === "browser_open") {
+                    clearInterval(loginPollTimer);
+                    loginPollTimer = null;
+                    statusText.textContent = "Browser open — log in, then click Done";
+                    doneBtn.classList.remove("hidden");
+                } else if (sd.status === "failed") {
+                    clearInterval(loginPollTimer);
+                    loginPollTimer = null;
+                    statusText.textContent = "Failed";
+                    showToast("Login error: " + (sd.error || "Browser launch failed"), "error");
+                } else if (sd.status === "done" || sd.status === "expired") {
+                    clearInterval(loginPollTimer);
+                    loginPollTimer = null;
+                    statusText.textContent = sd.error || "Session ended";
+                }
+            } catch {
+                // ignore transient errors
+            }
+        }, 500);
+    } catch (e) {
+        statusText.textContent = "Failed";
+        showToast("Login error: " + e.message, "error");
+    }
+}
+
+async function finishLoginSession() {
+    if (!loginSessionId) return;
+
+    const statusText = document.getElementById("auth-status-text");
+    const doneBtn = document.getElementById("auth-done-btn");
+    doneBtn.classList.add("hidden");
+    statusText.textContent = "Extracting cookies...";
+
+    try {
+        const resp = await fetch(`/api/auth/login/${loginSessionId}/done`, { method: "POST" });
+        if (!resp.ok) {
+            const err = await resp.json();
+            statusText.textContent = "Failed";
+            showToast("Error: " + (err.detail || "Unknown"), "error");
+            return;
+        }
+    } catch (e) {
+        statusText.textContent = "Failed";
+        showToast("Error: " + e.message, "error");
+        return;
+    }
+
+    // Poll until done
+    if (loginPollTimer) clearInterval(loginPollTimer);
+    loginPollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch(`/api/auth/login/${loginSessionId}`);
+            const data = await resp.json();
+            if (data.status === "done") {
+                clearInterval(loginPollTimer);
+                loginPollTimer = null;
+                loginCookies = data.cookies;
+                loginDiscoveredUrls = data.discovered_urls || [];
+                const count = Object.keys(data.cookies).length;
+                const urlCount = loginDiscoveredUrls.length;
+                statusText.textContent = `Logged in (${count} cookie${count !== 1 ? "s" : ""}` +
+                    (urlCount ? `, ${urlCount} page${urlCount !== 1 ? "s" : ""} found` : "") + `)`;
+                statusText.classList.add("auth-success");
+            } else if (data.status === "failed" || data.status === "expired") {
+                clearInterval(loginPollTimer);
+                loginPollTimer = null;
+                statusText.textContent = data.error || "Session " + data.status;
+                showToast("Login session " + data.status, "error");
+            }
+        } catch {
+            // ignore transient fetch errors
+        }
+    }, 1000);
+}
+
+function clearLoginSession() {
+    if (loginPollTimer) {
+        clearInterval(loginPollTimer);
+        loginPollTimer = null;
+    }
+    loginSessionId = null;
+    loginCookies = null;
+    loginDiscoveredUrls = null;
+    document.getElementById("auth-status").classList.add("hidden");
+    document.getElementById("auth-done-btn").classList.add("hidden");
+    const statusText = document.getElementById("auth-status-text");
+    statusText.textContent = "";
+    statusText.classList.remove("auth-success");
 }
 
 // Init on DOM ready

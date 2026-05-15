@@ -7,7 +7,7 @@ A Python-based tool that clones static and JavaScript-rendered websites for offl
 Developers, designers, and researchers often need offline copies of websites for reference, analysis, or archival purposes. Existing tools are either CLI-only, lack real-time progress feedback, fail to properly rewrite asset URLs for offline use, or cannot handle modern JavaScript-rendered sites.
 
 ## Goals
-- Clone any public website (static or SPA) with a single URL input
+- Clone any website — public or authenticated — with a single URL input
 - Download all pages and assets (CSS, JS, images, fonts) within the same domain
 - Rewrite all URLs so the cloned site works fully offline
 - Provide real-time progress feedback during cloning
@@ -18,7 +18,6 @@ Developers, designers, and researchers often need offline copies of websites for
 - Optionally render JavaScript-heavy pages via headless browser
 
 ## Non-Goals
-- Bypassing authentication or paywalls (though custom cookies/headers are supported)
 - Cloning dynamic server-side functionality (forms, APIs)
 - Scheduled/automated cloning
 - CDN or cloud hosting of cloned sites
@@ -123,11 +122,24 @@ Developers, designers, and researchers often need offline copies of websites for
 - Custom HTTP headers merged into requests
 - Exposed via API request body
 
-### FR-12: SPA / JavaScript Rendering (Optional)
+### FR-12: Browser-Based Login Flow
+- "Login First" button in the clone form launches a real browser (Playwright)
+- User manually logs into the target site in the opened browser
+- System captures all cookies from the authenticated browser session
+- Discovered navigation links from the authenticated page are collected as seed URLs
+- Seed URLs are injected into the BFS crawl queue, enabling cloning of member-only areas
+- Login sessions have a 10-minute timeout with automatic cleanup
+- Runs Playwright in a dedicated thread to avoid blocking the async event loop
+- Thread-safe flag synchronization between main and browser threads
+- Polling-based status tracking: pending → browser_open → done → expired/failed
+
+### FR-13: SPA / JavaScript Rendering (Optional)
 - Optional Playwright integration (opt-in checkbox)
-- Headless Chromium renders pages before downloading
-- Intercepts network requests for asset discovery
-- Graceful fallback if Playwright is not installed
+- ThreadedPlaywrightRenderer runs headless Chromium in a separate thread with its own event loop
+- Pre-loads authentication cookies from the login flow
+- Intercepts network requests during page rendering for asset discovery
+- Graceful fallback to raw HTML fetch if rendering fails
+- Automatically enabled when auth_cookies are present (from login flow)
 - "JS Render" checkbox with descriptive tooltip
 
 ---
@@ -203,6 +215,9 @@ Developers, designers, and researchers often need offline copies of websites for
 | GET    | `/api/jobs/{id}/download`      | Download cloned site as ZIP      |
 | GET    | `/site/{id}/{path}`            | Browse cloned site (new tab)     |
 | GET    | `/api/jobs/{id}/browse/{path}` | Browse/embed cloned site files   |
+| POST   | `/api/auth/login`              | Start a browser login session    |
+| GET    | `/api/auth/login/{id}`         | Check login session status       |
+| POST   | `/api/auth/login/{id}/done`    | Signal login completion          |
 
 ---
 
@@ -220,7 +235,8 @@ Developers, designers, and researchers often need offline copies of websites for
   "user_agent": "StaticSiteCloner/1.0",
   "auth_cookies": {"session": "abc123"},
   "auth_headers": {"Authorization": "Bearer token"},
-  "use_playwright": false
+  "use_playwright": false,
+  "seed_urls": ["https://example.com/dashboard", "https://example.com/profile"]
 }
 ```
 
@@ -233,6 +249,8 @@ Developers, designers, and researchers often need offline copies of websites for
 - Max depth and max pages controls
 - Verify SSL checkbox (with tooltip explaining when to disable)
 - JS Render checkbox (with tooltip explaining SPA rendering)
+- **Login First** button — opens a real browser for authenticated session capture
+- Login status display showing browser state, captured cookies, and discovered URLs
 
 ### Progress Section
 - Real-time stats grid: Pages, Assets, Errors (clickable for detail panel)
@@ -258,11 +276,11 @@ Developers, designers, and researchers often need offline copies of websites for
 ## Success Criteria
 1. Can clone a multi-page static site with all assets rendering correctly offline
 2. Can clone a React/Vue/Angular SPA using JS Render mode
-3. Progress updates stream in real-time during cloning
-4. ZIP download contains complete, working site with accurate size display
-5. Handles errors gracefully with categorized reporting (404s, timeouts, SSL, DNS)
-6. Job cancellation stops the clone within seconds
-7. robots.txt is respected by default
-8. Rate limiting prevents abuse of the clone API
-9. In-app preview works for both static and SPA sites
-10. All 98 unit tests pass
+3. Can clone authenticated/member-only sites using the browser login flow
+4. Progress updates stream in real-time during cloning
+5. ZIP download contains complete, working site with accurate size display
+6. Handles errors gracefully with categorized reporting (404s, timeouts, SSL, DNS)
+7. Job cancellation stops the clone within seconds
+8. robots.txt is respected by default
+9. Rate limiting prevents abuse of the clone API
+10. In-app preview works for both static and SPA sites
