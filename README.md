@@ -1,16 +1,35 @@
 # SiteCloner
 
-A Python-based static website cloner with a real-time web UI. Provide a URL, and SiteCloner will crawl the entire site, download all pages and assets, rewrite URLs for offline use, and package everything for local browsing or ZIP download.
+A Python-based static website cloner with a real-time web UI. Provide a URL, and SiteCloner will crawl the entire site — static or JavaScript-rendered — download all pages and assets, rewrite URLs for offline use, and package everything for local browsing, in-app preview, or ZIP download.
 
 ## Features
 
-- **Full site cloning** -- crawls HTML pages, CSS, JavaScript, images, fonts, and videos
-- **Offline-ready** -- all internal URLs are rewritten to relative paths so the cloned site works without a server
-- **Real-time progress** -- live updates via Server-Sent Events (SSE) with page count, asset count, and activity log
-- **In-browser preview** -- browse the cloned site directly through the web UI
-- **ZIP download** -- download the entire cloned site as a single ZIP file
-- **Configurable** -- control crawl depth, max pages, concurrency, timeout, and file size limits
-- **Async throughout** -- built on aiohttp and asyncio for fast, concurrent downloads
+- **Full site cloning** — crawls HTML pages, CSS, JavaScript, images, fonts, and videos
+- **Offline-ready** — all internal URLs are rewritten to relative paths so the cloned site works without a server
+- **SPA / JavaScript rendering** — optional Playwright integration renders JS-heavy pages (React, Vue, Angular) before downloading
+- **Real-time progress** — live updates via Server-Sent Events (SSE) with page count, asset count, error count, and activity log
+- **In-app site preview** — preview cloned sites in a sandboxed iframe modal without leaving the UI
+- **Dedicated browse URL** — browse cloned sites at `/site/{job_id}/` in a new tab with SPA routing support
+- **ZIP download** — download the entire cloned site as a ZIP with file size displayed on the button
+- **Job cancellation** — cancel in-progress jobs at 3 checkpoints (crawl, download, rewrite)
+- **Retry logic** — exponential backoff with jitter for transient failures (configurable, default 3 attempts)
+- **Categorized error reporting** — errors classified as TIMEOUT, DNS_FAILURE, HTTP_ERROR, SSL_ERROR, TOO_LARGE, PARSE_ERROR, or UNKNOWN with a clickable detail panel
+- **robots.txt compliance** — respects robots.txt rules and crawl-delay by default (configurable)
+- **Sitemap discovery** — optional sitemap.xml parsing for URL discovery
+- **Rate limiting** — per-domain request delay to avoid overwhelming target servers
+- **API rate limiting** — sliding window rate limiter per IP on the clone endpoint (default 10 req/min)
+- **SSL verification toggle** — disable SSL verification for self-signed or internal certificates
+- **Authentication support** — pass custom cookies and HTTP headers for authenticated sites
+- **Compression support** — handles gzip, deflate, and Brotli-compressed responses
+- **Priority download queue** — CSS files downloaded first to discover secondary assets (fonts, backgrounds)
+- **Async file I/O** — concurrent file writes via aiofiles with semaphore (20 simultaneous writes)
+- **Charset detection** — detects encoding from Content-Type header, HTML meta tags, and XML declarations
+- **Job cleanup** — automatic TTL-based cleanup of expired jobs (default 1 hour)
+- **Duplicate detection** — warns when cloning a URL that was already cloned recently
+- **Job history** — search by domain and filter by status (Done, Failed, Cancelled, Crawling, Downloading)
+- **Retry failed jobs** — one-click retry for failed or cancelled jobs
+- **Configurable** — control crawl depth, max pages, concurrency, timeout, file size limits, and more
+- **98 unit tests** — comprehensive test suite covering all modules
 
 ## How It Works
 
@@ -20,23 +39,27 @@ SiteCloner operates in four sequential phases:
 
 The engine starts from the given URL and performs a **breadth-first search** across the site. For each HTML page it downloads:
 
-1. The page content is fetched via aiohttp
+1. The page content is fetched via aiohttp (or Playwright if JS rendering is enabled)
 2. BeautifulSoup parses the HTML to extract two things:
-   - **Page links** (`<a href>`) -- queued for further crawling (if within depth limit)
+   - **Page links** (`<a href>`) — queued for further crawling (if within depth limit)
    - **Asset URLs** (CSS, JS, images, fonts, videos from `<link>`, `<script>`, `<img>`, `<video>`, `<audio>`, `<source>`, inline styles, etc.)
 3. Only same-domain links are followed; external URLs are left as-is
+4. robots.txt rules are checked before crawling each URL (if enabled)
 
-Crawling stops when either `max_depth` or `max_pages` is reached.
+Crawling stops when `max_depth`, `max_pages` is reached, or cancellation is requested.
 
 ### Phase 2: Download Assets
 
-All discovered asset URLs (CSS, JS, images, fonts) are downloaded concurrently using an asyncio semaphore to limit parallelism (default: 10 concurrent requests).
+Assets are downloaded in **two priority waves**:
 
-After the initial asset download, **CSS files are parsed** for secondary references -- `url()` values pointing to fonts, background images, and other resources. These secondary assets are then downloaded in a second batch.
+1. **CSS files first** — downloaded concurrently, then parsed for secondary references (`url()` values pointing to fonts, background images)
+2. **All other assets + secondary CSS assets** — downloaded concurrently in the second wave
+
+An asyncio semaphore limits parallelism (default: 10 concurrent requests). Failed downloads are retried with exponential backoff and jitter.
 
 ### Phase 3: Rewrite URLs
 
-Once all files are downloaded and a complete `url_map` (absolute URL -> local file path) is built, the engine rewrites every internal URL:
+Once all files are downloaded and a complete `url_map` (absolute URL → local file path) is built, the engine rewrites every internal URL:
 
 - **HTML files**: rewrites `href`, `src`, `srcset`, `poster`, inline `style` attributes, `<style>` blocks, and `<meta>` image tags. Removes `<base>` tags since all paths become relative.
 - **CSS files**: rewrites all `url()` references (backgrounds, fonts, imports)
@@ -45,7 +68,7 @@ External URLs (different domain) are left as absolute URLs.
 
 ### Phase 4: Save to Disk
 
-All rewritten files are written to `output/<domain>_<timestamp>/`, preserving the original site's directory structure. The output directory is immediately available for browsing or ZIP download.
+All rewritten files are written asynchronously (via aiofiles) to `output/<domain>_<timestamp>/`, preserving the original site's directory structure. Total site size is computed and stored on the job.
 
 ## Architecture
 
@@ -55,18 +78,26 @@ All rewritten files are written to `output/<domain>_<timestamp>/`, preserving th
                     |  Web UI    |
                     +-----+-----+
                           |
-                    +-----v-----+
-                    | JobManager |  manages job lifecycle & SSE queues
-                    +-----+-----+
+                    +-----v------+
+                    | Middleware  |  API rate limiting (per IP)
+                    +-----+------+
                           |
-                    +-----v-----+
-                    |CloneEngine |  BFS orchestrator
-                    +-----+-----+
+                    +-----v------+
+                    | JobManager |  lifecycle, SSE pub/sub, TTL cleanup
+                    +-----+------+
                           |
-            +-------------+-------------+
-            |             |             |
-       Downloader     Parser       Rewriter
-       (aiohttp)    (BS4/lxml)   (BS4/regex)
+                    +-----v------+
+                    |CloneEngine |  BFS orchestrator (4 phases)
+                    +-----+------+
+                          |
+            +-------+-----+-----+--------+
+            |       |           |        |
+       Downloader Parser    Rewriter  Renderer
+       (aiohttp) (BS4/lxml) (BS4/regex) (Playwright)
+            |
+      +-----+------+
+      |            |
+  RateLimiter  RobotsChecker
 ```
 
 ## Quick Start
@@ -74,6 +105,7 @@ All rewritten files are written to `output/<domain>_<timestamp>/`, preserving th
 ### Prerequisites
 
 - Python 3.10 or higher
+- (Optional) Playwright for JS rendering: `pip install playwright && playwright install chromium`
 
 ### Installation
 
@@ -84,6 +116,10 @@ cd copy_site
 
 # Install dependencies
 pip install -r requirements.txt
+
+# (Optional) Install Playwright for SPA rendering
+pip install playwright
+playwright install chromium
 ```
 
 ### Run
@@ -93,6 +129,33 @@ python app.py
 ```
 
 The server starts at **http://localhost:8000**. Open it in your browser, enter a URL, and hit Clone.
+
+## UI Features
+
+### Clone Form
+- URL input with validation
+- Max depth and max pages controls
+- **Verify SSL** checkbox with tooltip — disable for self-signed/expired certificates
+- **JS Render** checkbox with tooltip — enable for single-page apps (React, Vue, Angular)
+
+### Progress Section
+- Real-time stats grid: Pages, Assets, Errors (clickable for detail panel)
+- Animated progress bar with percentage
+- Cancel button for in-progress jobs
+- Activity log with timestamped entries
+- Categorized error detail panel
+
+### Job History
+- Search by domain text input
+- Filter by status dropdown (Done, Failed, Cancelled, Crawling, Downloading)
+- Job cards with: URL, status badge, page/asset/error counts, site size
+- Action buttons: Preview, Browse, ZIP (with size), Retry, Delete
+
+### In-App Preview
+- Modal overlay with sandboxed iframe
+- Frame-busting protection (neutralizes `top`/`parent` navigation)
+- Open in Tab and Close buttons
+- Escape key or overlay click to close
 
 ## API Reference
 
@@ -107,7 +170,15 @@ POST /api/clone
 {
   "url": "https://example.com",
   "max_depth": 10,
-  "max_pages": 500
+  "max_pages": 500,
+  "verify_ssl": true,
+  "request_delay": 0.0,
+  "respect_robots": true,
+  "use_sitemap": false,
+  "user_agent": "StaticSiteCloner/1.0",
+  "auth_cookies": {"session": "abc123"},
+  "auth_headers": {"Authorization": "Bearer token"},
+  "use_playwright": false
 }
 ```
 
@@ -115,15 +186,26 @@ POST /api/clone
 |-------|------|---------|-------------|
 | `url` | string | *required* | The URL to clone |
 | `max_depth` | int | 10 | Maximum BFS crawl depth |
-| `max_pages` | int | 500 | Maximum number of HTML pages to crawl |
+| `max_pages` | int | 500 | Maximum HTML pages to crawl |
+| `verify_ssl` | bool | true | Validate SSL certificates |
+| `request_delay` | float | 0.0 | Delay between requests in seconds |
+| `respect_robots` | bool | true | Obey robots.txt rules |
+| `use_sitemap` | bool | false | Parse sitemap.xml for URL discovery |
+| `user_agent` | string | `StaticSiteCloner/1.0` | HTTP User-Agent header |
+| `auth_cookies` | object | null | Custom cookies for authenticated sites |
+| `auth_headers` | object | null | Custom HTTP headers |
+| `use_playwright` | bool | false | Render pages with headless browser |
 
 **Response:**
 ```json
 {
   "job_id": "abc123",
-  "message": "Clone started"
+  "message": "Clone started",
+  "warning": ""
 }
 ```
+
+The `warning` field is populated when the URL was already cloned recently.
 
 ### List All Jobs
 
@@ -149,11 +231,40 @@ GET /api/jobs/{job_id}
   "pages_crawled": 42,
   "assets_downloaded": 156,
   "errors_count": 3,
-  "error_message": ""
+  "error_message": "",
+  "errors": [
+    {
+      "url": "https://example.com/missing.png",
+      "category": "http_error",
+      "message": "HTTP 404",
+      "status_code": 404
+    }
+  ],
+  "site_size_bytes": 4523890,
+  "created_at": 1715788800.0,
+  "completed_at": 1715788860.0
 }
 ```
 
-**Job statuses:** `pending` -> `crawling` -> `downloading` -> `rewriting` -> `done` (or `failed`)
+**Job statuses:** `pending` → `crawling` → `downloading` → `rewriting` → `done` | `failed` | `cancelled`
+
+**Error categories:** `timeout`, `dns_failure`, `http_error`, `ssl_error`, `too_large`, `parse_error`, `unknown`
+
+### Cancel a Job
+
+```
+POST /api/jobs/{job_id}/cancel
+```
+
+Requests cancellation of an in-progress job. The job will stop at the next checkpoint (BFS loop, asset download, or rewrite phase).
+
+### Delete a Job
+
+```
+DELETE /api/jobs/{job_id}
+```
+
+Deletes the job and its output files.
 
 ### Stream Progress Events (SSE)
 
@@ -170,7 +281,8 @@ Returns a Server-Sent Events stream. Event types:
 | `asset_downloaded` | An asset (CSS/JS/image/font) was downloaded |
 | `crawl_complete` | BFS crawl phase finished |
 | `secondary_assets_found` | Additional assets discovered in CSS files |
-| `error` | A non-fatal error occurred |
+| `error` | A non-fatal error occurred (includes category and details) |
+| `cancelled` | Job was cancelled by the user |
 | `done` | Clone completed successfully |
 | `end` | Stream is closing |
 
@@ -185,10 +297,16 @@ Returns the cloned site as a `.zip` file. Only available after the job completes
 ### Browse Cloned Site
 
 ```
-GET /api/jobs/{job_id}/browse/{path}
+GET /site/{job_id}/{path}
 ```
 
-Serves individual files from the cloned site. Includes path traversal protection.
+Dedicated route for browsing cloned sites in a new tab. Injects `<base>` tag for correct asset resolution and `history.replaceState` for SPA routing compatibility.
+
+```
+GET /api/jobs/{job_id}/browse/{path}?embed=1
+```
+
+API browse endpoint used by the iframe preview. With `embed=1`, adds frame-busting protection and appropriate CSP headers.
 
 ## Configuration
 
@@ -203,46 +321,85 @@ Default settings are defined in `config.py`:
 | `max_file_size` | 50 MB | Skip files larger than this |
 | `user_agent` | `StaticSiteCloner/1.0` | HTTP User-Agent header |
 | `output_dir` | `output` | Directory for cloned sites |
+| `max_retries` | 3 | Retry attempts for failed downloads |
+| `retry_base_delay` | 1.0s | Base delay for exponential backoff |
+| `verify_ssl` | true | Validate SSL certificates |
+| `request_delay` | 0.0s | Per-domain request delay |
+| `respect_robots` | true | Obey robots.txt rules |
+| `use_sitemap` | false | Parse sitemap.xml for URLs |
+| `job_ttl` | 3600s | Job expiration time (auto-cleanup) |
+| `api_rate_limit` | 10 | Max clone requests per IP per window |
+| `api_rate_window` | 60s | Rate limit sliding window |
+| `use_playwright` | false | Render pages with headless browser |
 
 ## Project Structure
 
 ```
 copy_site/
-├── app.py                  # Entry point (FastAPI + uvicorn)
-├── config.py               # CloneConfig dataclass
+├── app.py                  # Entry point (FastAPI + uvicorn, lifespan)
+├── config.py               # CloneConfig dataclass (all settings)
 ├── requirements.txt
+├── PRD.md                  # Product Requirements Document
 ├── cloner/                 # Core cloning engine
-│   ├── models.py           # Data classes (CloneJob, Asset, AssetType, JobStatus)
+│   ├── models.py           # CloneJob, Asset, ErrorDetail, ErrorCategory, JobStatus
 │   ├── url_utils.py        # URL normalization, path mapping, domain checks
-│   ├── downloader.py       # Async HTTP client with retry and size limits
+│   ├── downloader.py       # Async HTTP client, retry, rate limiting, compression
 │   ├── parser.py           # HTML/CSS link & asset extraction
 │   ├── rewriter.py         # URL rewriting for offline use
-│   └── engine.py           # BFS crawl orchestrator (4-phase pipeline)
+│   ├── engine.py           # BFS crawl orchestrator (4-phase pipeline)
+│   ├── encoding.py         # Charset detection utilities
+│   ├── robots.py           # robots.txt parsing & sitemap.xml discovery
+│   └── renderer.py         # Optional Playwright SPA renderer
 ├── web/                    # Web layer
 │   ├── schemas.py          # Pydantic request/response models
-│   ├── job_manager.py      # Job lifecycle, SSE pub/sub, ZIP generation
-│   └── routes.py           # FastAPI API endpoints
+│   ├── job_manager.py      # Job lifecycle, SSE pub/sub, TTL cleanup
+│   ├── routes.py           # API endpoints + cloned site serving
+│   └── middleware.py        # API rate limiting middleware
 ├── static/                 # Web UI (vanilla HTML/CSS/JS)
 │   ├── index.html
 │   ├── style.css
 │   └── app.js
+├── tests/                  # Unit tests (98 tests)
+│   ├── test_url_utils.py
+│   ├── test_parser.py
+│   ├── test_rewriter.py
+│   ├── test_downloader.py
+│   ├── test_engine.py
+│   ├── test_routes.py
+│   ├── test_job_manager.py
+│   └── test_encoding.py
 └── output/                 # Cloned sites stored here (gitignored)
 ```
 
 ## Tech Stack
 
-- **FastAPI** + **uvicorn** -- async web server
-- **aiohttp** -- async HTTP client for downloading
-- **BeautifulSoup4** + **lxml** -- HTML parsing and rewriting
-- **cssutils** + regex -- CSS parsing for `url()` references
-- **Vanilla JS** -- frontend with SSE for real-time updates
+| Component | Technology |
+|-----------|-----------|
+| Backend | Python 3.10+, FastAPI, uvicorn |
+| HTTP Client | aiohttp (async) |
+| HTML Parsing | BeautifulSoup4 + lxml |
+| CSS Parsing | cssutils + regex |
+| File I/O | aiofiles (async) |
+| Compression | Brotli |
+| SPA Rendering | Playwright (optional) |
+| Progress Stream | Server-Sent Events (SSE) |
+| Frontend | Vanilla HTML/CSS/JS |
+| Testing | pytest + pytest-asyncio |
+
+## Running Tests
+
+```bash
+pip install pytest pytest-asyncio aioresponses
+pytest tests/ -v
+```
 
 ## Limitations
 
-- Only clones static content -- JavaScript-rendered (SPA) content won't be captured
-- Stays within the same domain -- cross-domain pages are not followed
+- Only clones public content — does not bypass authentication or paywalls (custom cookies/headers are supported for authenticated access)
+- Stays within the same domain — cross-domain pages are not followed
 - Large sites may take significant time depending on page count and asset volume
-- Some dynamically loaded resources (lazy-loaded images, AJAX content) may be missed
+- Some dynamically loaded resources (lazy-loaded images, AJAX content) may be missed unless JS rendering is enabled
+- Dynamic server-side functionality (forms, APIs) is not cloned
 
 ## License
 

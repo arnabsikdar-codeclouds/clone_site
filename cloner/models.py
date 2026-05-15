@@ -20,6 +20,25 @@ class JobStatus(Enum):
     REWRITING = "rewriting"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ErrorCategory(Enum):
+    TIMEOUT = "timeout"
+    DNS_FAILURE = "dns_failure"
+    HTTP_ERROR = "http_error"
+    SSL_ERROR = "ssl_error"
+    TOO_LARGE = "too_large"
+    PARSE_ERROR = "parse_error"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ErrorDetail:
+    url: str
+    category: ErrorCategory
+    message: str
+    status_code: int = 0
 
 
 @dataclass
@@ -53,8 +72,12 @@ class CloneJob:
     pages_crawled: int = 0
     assets_found: int = 0
     assets_downloaded: int = 0
-    errors: list[str] = field(default_factory=list)
+    errors: list[ErrorDetail] = field(default_factory=list)
     error_message: str = ""
+    cancel_requested: bool = False
+    created_at: float = 0.0
+    completed_at: float = 0.0
+    site_size_bytes: int = 0
 
 
 # Type alias for progress callbacks

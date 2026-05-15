@@ -1,21 +1,24 @@
 # Product Requirements Document: Static Website Cloner
 
 ## Overview
-A Python-based tool that clones static websites for offline browsing. Users provide a URL through a web interface, and the tool crawls the entire site — downloading HTML, CSS, JavaScript, images, and fonts — then rewrites all URLs to work locally.
+A Python-based tool that clones static and JavaScript-rendered websites for offline browsing. Users provide a URL through a web interface, and the tool crawls the entire site — downloading HTML, CSS, JavaScript, images, and fonts — then rewrites all URLs to work locally. Includes job management, real-time progress, in-app preview, and production-ready features like retry logic, rate limiting, robots.txt compliance, and cancellation.
 
 ## Problem Statement
-Developers, designers, and researchers often need offline copies of websites for reference, analysis, or archival purposes. Existing tools are either CLI-only, lack real-time progress feedback, or fail to properly rewrite asset URLs for offline use.
+Developers, designers, and researchers often need offline copies of websites for reference, analysis, or archival purposes. Existing tools are either CLI-only, lack real-time progress feedback, fail to properly rewrite asset URLs for offline use, or cannot handle modern JavaScript-rendered sites.
 
 ## Goals
-- Clone any public static website with a single URL input
+- Clone any public website (static or SPA) with a single URL input
 - Download all pages and assets (CSS, JS, images, fonts) within the same domain
 - Rewrite all URLs so the cloned site works fully offline
 - Provide real-time progress feedback during cloning
-- Allow browsing the cloned site directly or downloading as ZIP
+- Allow browsing the cloned site directly, previewing in-app, or downloading as ZIP
+- Handle errors gracefully with categorized error reporting
+- Support cancellation of in-progress jobs
+- Respect robots.txt and rate limits for polite crawling
+- Optionally render JavaScript-heavy pages via headless browser
 
 ## Non-Goals
-- Cloning JavaScript-rendered SPAs (no headless browser)
-- Bypassing authentication or paywalls
+- Bypassing authentication or paywalls (though custom cookies/headers are supported)
 - Cloning dynamic server-side functionality (forms, APIs)
 - Scheduled/automated cloning
 - CDN or cloud hosting of cloned sites
@@ -25,6 +28,7 @@ Developers, designers, and researchers often need offline copies of websites for
 - Designers studying site layouts
 - Researchers archiving web content
 - Students learning from existing websites
+- QA teams needing static snapshots of sites
 
 ---
 
@@ -32,9 +36,10 @@ Developers, designers, and researchers often need offline copies of websites for
 
 ### FR-1: URL Input & Job Creation
 - User provides a target URL via the web UI
-- System validates the URL format
-- System creates a clone job and begins processing immediately
+- System validates the URL format and adds scheme if missing
+- System creates a clone job with timestamps and begins processing
 - Multiple jobs can run concurrently
+- Duplicate URL detection warns users if the URL was already cloned
 
 ### FR-2: Site Crawling
 - Breadth-first crawl of all internal pages (same domain)
@@ -44,6 +49,9 @@ Developers, designers, and researchers often need offline copies of websites for
 - Detection and handling of `<base>` tags
 - Skip external domain links (leave as absolute URLs)
 - Avoid infinite loops via visited URL tracking
+- robots.txt compliance (configurable, enabled by default)
+- Optional sitemap.xml URL discovery
+- Crawl delay from robots.txt integrated with rate limiter
 
 ### FR-3: Asset Downloading
 - Download all referenced assets:
@@ -53,10 +61,12 @@ Developers, designers, and researchers often need offline copies of websites for
   - Fonts (CSS `@font-face`)
   - Favicons (`<link rel="icon">`)
   - Videos (`<video src>`, `<source src>`)
+- Priority download queue: CSS files first, then everything else + secondary assets
 - Parse CSS files for secondary assets (fonts, background images)
 - Skip data URIs (leave inline)
 - Configurable max file size (default: 50MB per file)
 - Parallel downloads with concurrency limit (default: 10)
+- Support for gzip, deflate, and Brotli compression
 
 ### FR-4: URL Rewriting
 - Rewrite all internal URLs in HTML to relative local paths
@@ -71,27 +81,54 @@ Developers, designers, and researchers often need offline copies of websites for
 - Preserve original directory structure where possible
 - Pages without extensions saved as `<path>/index.html`
 - Handle query string URLs with hash-based filenames
+- Async file I/O with concurrency limit (20 simultaneous writes)
+- Compute and store total site size after save
 
 ### FR-6: Real-Time Progress
 - Server-Sent Events (SSE) streaming to the browser
 - Show: pages found/downloaded, assets found/downloaded, errors
 - Live event log showing current activity
 - Visual progress indicators (counters/bars)
+- Categorized error details (clickable error panel)
 
 ### FR-7: Browse Cloned Site
-- Serve cloned files directly from the output directory
-- User can browse the cloned site in a new browser tab
+- Dedicated `/site/{job_id}/` URL for browsing in a new tab
 - Correct MIME types for all file types
+- SPA-compatible: `history.replaceState` + `<base>` tag for React/Vue/Angular routing
+- Path traversal protection
 
-### FR-8: ZIP Download
+### FR-8: In-App Site Preview
+- Modal overlay with sandboxed iframe
+- Frame-busting protection (neutralizes top/parent navigation)
+- X-Frame-Options and CSP headers for embed mode
+- "Open in Tab" button and Escape key to close
+
+### FR-9: ZIP Download
 - Generate ZIP archive of the cloned site on demand
+- Show download size on the ZIP button (e.g. "ZIP (4.2 MB)")
 - Cache ZIP file for repeated downloads
 - Stream download to browser
 
-### FR-9: Job History
+### FR-10: Job Management
 - List all past clone jobs with status
-- Show job metadata: URL, start time, page/asset counts, errors
-- Persist history across server restarts (JSON file)
+- Show job metadata: URL, domain, page/asset counts, errors, size
+- Cancel in-progress jobs (3 checkpoint cancellation)
+- Delete jobs and their output files
+- Retry failed/cancelled jobs with one click
+- Job history search by domain and filter by status
+- Automatic cleanup of expired jobs (configurable TTL, default: 1 hour)
+
+### FR-11: Authentication Support
+- Custom cookies passed to the session cookie jar
+- Custom HTTP headers merged into requests
+- Exposed via API request body
+
+### FR-12: SPA / JavaScript Rendering (Optional)
+- Optional Playwright integration (opt-in checkbox)
+- Headless Chromium renders pages before downloading
+- Intercepts network requests for asset discovery
+- Graceful fallback if Playwright is not installed
+- "JS Render" checkbox with descriptive tooltip
 
 ---
 
@@ -99,95 +136,133 @@ Developers, designers, and researchers often need offline copies of websites for
 
 ### Performance
 - Concurrent downloads (default 10 simultaneous connections)
-- Politeness delay between requests (default 100ms)
+- Per-domain rate limiter with configurable delay
+- Async file I/O via aiofiles
 - Request timeout (default 30 seconds)
-- Single retry on transient failures (5xx, timeout)
+- Priority queue: CSS first, then other assets + secondaries
+- Brotli/gzip/deflate compression support
 
 ### Security
-- Path traversal protection when serving cloned files
+- Path traversal protection on all file-serving endpoints
+- SSL certificate verification (configurable, enabled by default)
 - User-Agent identification (`SiteCloner/1.0`)
 - No execution of downloaded JavaScript on the server
 - Input URL validation
+- API rate limiting per IP (sliding window, default: 10 requests/minute)
+- Sandboxed iframe for in-app preview
+- Frame-busting neutralization in embed mode
 
 ### Reliability
-- Graceful handling of 404s, timeouts, and malformed HTML
+- Exponential backoff retry with jitter (configurable, default: 3 attempts)
+- Categorized error reporting (TIMEOUT, DNS_FAILURE, HTTP_ERROR, SSL_ERROR, TOO_LARGE, PARSE_ERROR, UNKNOWN)
+- 3-point cancellation (BFS loop, asset download, rewrite phase)
 - Jobs continue despite individual page/asset failures
 - Errors logged and reported to UI without crashing
+- Automatic cleanup of expired jobs
+
+### Encoding & Compatibility
+- Charset detection from Content-Type header, HTML meta tag, XML declaration
+- Fallback to UTF-8 with replacement on decode errors
 
 ### Limits & Safety
 - Max 500 pages per job (configurable)
-- Max 2000 assets per job (configurable)
 - Max 50MB per individual file (configurable)
 - Max crawl depth of 10 (configurable)
+- robots.txt compliance (configurable)
 
 ---
 
 ## Tech Stack
 
-| Component       | Technology                          |
-|-----------------|-------------------------------------|
-| Backend         | Python 3.10+, FastAPI, uvicorn      |
-| HTTP Client     | aiohttp (async)                     |
-| HTML Parsing    | BeautifulSoup4 + lxml               |
-| CSS Parsing     | cssutils + regex                    |
-| Progress Stream | Server-Sent Events (SSE)            |
-| Frontend        | Vanilla HTML/CSS/JS                 |
-| Packaging       | ZIP via Python zipfile module        |
+| Component       | Technology                              |
+|-----------------|-----------------------------------------|
+| Backend         | Python 3.10+, FastAPI, uvicorn          |
+| HTTP Client     | aiohttp (async)                         |
+| HTML Parsing    | BeautifulSoup4 + lxml                   |
+| CSS Parsing     | cssutils + regex                        |
+| File I/O        | aiofiles (async)                        |
+| Compression     | Brotli                                  |
+| SPA Rendering   | Playwright (optional)                   |
+| Progress Stream | Server-Sent Events (SSE)                |
+| Frontend        | Vanilla HTML/CSS/JS                     |
+| Packaging       | ZIP via Python zipfile module            |
+| Testing         | pytest + pytest-asyncio                 |
 
 ---
 
 ## API Endpoints
 
-| Method | Path                           | Description                |
-|--------|--------------------------------|----------------------------|
-| POST   | `/api/clone`                   | Start a new clone job      |
-| GET    | `/api/jobs`                    | List all jobs              |
-| GET    | `/api/jobs/{id}`               | Get job status             |
-| GET    | `/api/jobs/{id}/events`        | SSE progress stream        |
-| GET    | `/api/jobs/{id}/download`      | Download cloned site as ZIP|
-| GET    | `/api/jobs/{id}/browse/{path}` | Browse cloned site files   |
+| Method | Path                           | Description                      |
+|--------|--------------------------------|----------------------------------|
+| POST   | `/api/clone`                   | Start a new clone job            |
+| GET    | `/api/jobs`                    | List all jobs                    |
+| GET    | `/api/jobs/{id}`               | Get job status with error details|
+| POST   | `/api/jobs/{id}/cancel`        | Cancel a running job             |
+| DELETE | `/api/jobs/{id}`               | Delete job and output files      |
+| GET    | `/api/jobs/{id}/events`        | SSE progress stream              |
+| GET    | `/api/jobs/{id}/download`      | Download cloned site as ZIP      |
+| GET    | `/site/{id}/{path}`            | Browse cloned site (new tab)     |
+| GET    | `/api/jobs/{id}/browse/{path}` | Browse/embed cloned site files   |
 
 ---
 
-## UI Wireframe (Text)
+## Clone Request Schema
 
+```json
+{
+  "url": "https://example.com",
+  "max_depth": 10,
+  "max_pages": 500,
+  "verify_ssl": true,
+  "request_delay": 0.0,
+  "respect_robots": true,
+  "use_sitemap": false,
+  "user_agent": "StaticSiteCloner/1.0",
+  "auth_cookies": {"session": "abc123"},
+  "auth_headers": {"Authorization": "Bearer token"},
+  "use_playwright": false
+}
 ```
-┌─────────────────────────────────────────────┐
-│            🌐 Site Cloner                    │
-├─────────────────────────────────────────────┤
-│                                             │
-│  URL: [https://example.com        ] [Clone] │
-│                                             │
-├─────────────────────────────────────────────┤
-│  Progress:                                  │
-│  Pages:  12 / 45    ████████░░░░░░  27%     │
-│  Assets: 34 / 120   ████░░░░░░░░░░  28%     │
-│  Errors: 2                                  │
-│                                             │
-│  ┌─ Event Log ────────────────────────────┐ │
-│  │ [14:32:01] Crawling /about/team        │ │
-│  │ [14:32:02] Downloaded css/main.css     │ │
-│  │ [14:32:02] Downloaded images/logo.png  │ │
-│  │ [14:32:03] Error: /old-page (404)      │ │
-│  └────────────────────────────────────────┘ │
-│                                             │
-├─────────────────────────────────────────────┤
-│  History:                                   │
-│  ┌────────────────────────────────────────┐ │
-│  │ ✅ example.com — 45 pages, 120 assets  │ │
-│  │    May 14, 2026    [Browse] [Download] │ │
-│  ├────────────────────────────────────────┤ │
-│  │ ✅ docs.python.org — 12 pages, 30 assets│ │
-│  │    May 13, 2026    [Browse] [Download] │ │
-│  └────────────────────────────────────────┘ │
-└─────────────────────────────────────────────┘
-```
+
+---
+
+## UI Features
+
+### Clone Form
+- URL input with validation
+- Max depth and max pages controls
+- Verify SSL checkbox (with tooltip explaining when to disable)
+- JS Render checkbox (with tooltip explaining SPA rendering)
+
+### Progress Section
+- Real-time stats grid: Pages, Assets, Errors (clickable for detail panel)
+- Animated progress bar with percentage
+- Cancel button for in-progress jobs
+- Activity log with timestamped entries
+- Categorized error detail panel
+
+### Job History
+- Search by domain text input
+- Filter by status dropdown (Done, Failed, Cancelled, Crawling, Downloading)
+- Job cards with: URL, status badge, page/asset/error counts, site size
+- Action buttons: Preview, Browse, ZIP (with size), Retry, Delete
+
+### In-App Preview
+- Modal overlay with sandboxed iframe
+- Open in Tab and Close buttons
+- Escape key to close
+- Overlay click to close
 
 ---
 
 ## Success Criteria
-1. Can clone a multi-page static site (e.g., a documentation site) with all assets
-2. Cloned site renders correctly when browsed offline (CSS, images, fonts load)
+1. Can clone a multi-page static site with all assets rendering correctly offline
+2. Can clone a React/Vue/Angular SPA using JS Render mode
 3. Progress updates stream in real-time during cloning
-4. ZIP download contains complete, working site
-5. Handles errors gracefully without crashing (404s, timeouts, large files)
+4. ZIP download contains complete, working site with accurate size display
+5. Handles errors gracefully with categorized reporting (404s, timeouts, SSL, DNS)
+6. Job cancellation stops the clone within seconds
+7. robots.txt is respected by default
+8. Rate limiting prevents abuse of the clone API
+9. In-app preview works for both static and SPA sites
+10. All 98 unit tests pass

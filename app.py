@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -8,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from config import CloneConfig
 from web.job_manager import JobManager
 from web.routes import router, init_routes
+from web.middleware import APIRateLimitMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,9 +19,20 @@ logging.basicConfig(
 config = CloneConfig()
 os.makedirs(config.output_dir, exist_ok=True)
 
-app = FastAPI(title="Static Website Cloner")
 manager = JobManager(config)
 init_routes(manager)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    manager.start_cleanup_loop()
+    yield
+
+
+app = FastAPI(title="Static Website Cloner", lifespan=lifespan)
+
+# API rate limiting middleware (D3)
+app.add_middleware(APIRateLimitMiddleware, config=config)
 
 app.include_router(router)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

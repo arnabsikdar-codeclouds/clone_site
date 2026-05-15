@@ -58,6 +58,24 @@
                     <span class="option-label">Max pages</span>
                     <input type="number" id="max-pages" value="500" min="1" max="5000">
                 </label>
+                <label class="checkbox-label has-tooltip">
+                    <input type="checkbox" id="verify-ssl" checked>
+                    <span class="option-label">Verify SSL</span>
+                    <div class="tooltip">
+                        <strong>SSL Certificate Verification</strong>
+                        <p>Validates the target site's SSL/TLS certificate. Uncheck this when cloning sites with self-signed, expired, or invalid certificates (e.g. internal/staging servers, localhost with HTTPS).</p>
+                        <span class="tooltip-hint">Enabled by default for security</span>
+                    </div>
+                </label>
+                <label class="checkbox-label has-tooltip">
+                    <input type="checkbox" id="use-playwright">
+                    <span class="option-label">JS Render</span>
+                    <div class="tooltip">
+                        <strong>JavaScript Rendering (Playwright)</strong>
+                        <p>Renders pages in a headless browser before downloading, capturing JavaScript-generated content. Use this for single-page apps (React, Vue, Angular), sites that load content dynamically, or pages that rely on JS for layout.</p>
+                        <span class="tooltip-hint">Requires Playwright installed separately</span>
+                    </div>
+                </label>
             </div>
         </section>
 
@@ -69,7 +87,15 @@
                     </svg>
                     <span id="progress-title">Progress</span>
                 </h2>
-                <span id="status-badge" class="badge">Starting</span>
+                <div class="section-header-actions">
+                    <button id="cancel-btn" class="cancel-btn hidden" onclick="cancelCurrentJob()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+                        </svg>
+                        Cancel
+                    </button>
+                    <span id="status-badge" class="badge">Starting</span>
+                </div>
             </div>
 
             <div class="stats-grid">
@@ -95,7 +121,7 @@
                         <span class="stat-label">Assets</span>
                     </div>
                 </div>
-                <div class="stat-card">
+                <div class="stat-card clickable" onclick="toggleErrorPanel()">
                     <div class="stat-icon errors-icon">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
@@ -106,6 +132,15 @@
                         <span class="stat-label">Errors</span>
                     </div>
                 </div>
+            </div>
+
+            <!-- Error detail panel -->
+            <div id="error-panel" class="error-panel hidden">
+                <div class="error-panel-header">
+                    <span>Error Details</span>
+                    <button onclick="toggleErrorPanel()" class="close-panel-btn">&times;</button>
+                </div>
+                <div id="error-list" class="error-list"></div>
             </div>
 
             <div class="progress-track">
@@ -135,6 +170,18 @@
                     History
                 </h2>
             </div>
+            <!-- Filter bar (E2) -->
+            <div class="filter-bar">
+                <input type="text" id="filter-search" placeholder="Search by domain..." class="filter-input" oninput="applyFilters()">
+                <select id="filter-status" class="filter-select" onchange="applyFilters()">
+                    <option value="">All statuses</option>
+                    <option value="done">Done</option>
+                    <option value="failed">Failed</option>
+                    <option value="cancelled">Cancelled</option>
+                    <option value="crawling">Crawling</option>
+                    <option value="downloading">Downloading</option>
+                </select>
+            </div>
             <div id="job-list" class="job-list">
                 <div class="empty-state">
                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
@@ -145,6 +192,20 @@
                 </div>
             </div>
         </section>
+    </div>
+
+    <!-- Preview modal (E4) -->
+    <div id="preview-modal" class="modal-overlay hidden" onclick="closePreviewOnOverlay(event)">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span id="preview-title" class="modal-title">Site Preview</span>
+                <div class="modal-actions">
+                    <button onclick="openPreviewInTab()" class="modal-btn">Open in Tab</button>
+                    <button onclick="closePreview()" class="modal-btn modal-close-btn">&times;</button>
+                </div>
+            </div>
+            <iframe id="preview-iframe" class="preview-iframe" sandbox="allow-same-origin allow-scripts allow-popups allow-forms"></iframe>
+        </div>
     </div>
 
     <script src="app.js"></script>
