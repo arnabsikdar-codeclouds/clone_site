@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 def rewrite_html(html: str, page_url: str, url_map: dict[str, str], page_local_path: str) -> str:
     """Rewrite URLs in HTML to relative local paths."""
-    soup = BeautifulSoup(html, "lxml")
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
 
     # Handle <base> tag — remove it since we use relative paths
     base_url = page_url

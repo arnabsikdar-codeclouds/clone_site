@@ -24,7 +24,10 @@ CSS_IMPORT_RE = re.compile(
 def parse_html(html: str, page_url: str, domain: str) -> tuple[list[str], list[str]]:
     """Parse HTML and extract internal page links and asset URLs.
     Returns (page_links, asset_urls)."""
-    soup = BeautifulSoup(html, "lxml")
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
 
     # Handle <base> tag
     base_url = page_url
